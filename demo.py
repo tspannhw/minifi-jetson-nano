@@ -1,3 +1,5 @@
+# 2017 load pictures and analyze
+# https://github.com/tspannhw/mxnet_rpi/blob/master/analyze.py
 #!/usr/bin/python
 #
 # Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
@@ -20,7 +22,6 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 #
-# Tim Spann July 2019 - for python 3.5 jetson nano
 import time
 import sys
 import datetime
@@ -36,12 +37,41 @@ from time import gmtime, strftime
 import random, string
 import time
 from time import gmtime, strftime
+import random, string
+import psutil
+import base64
+import uuid
+# Importing socket library 
+import socket 
 
 import jetson.inference
 import jetson.utils
 
 import argparse
 
+external_IP_and_port = ('198.41.0.4', 53)  # a.root-servers.net
+socket_family = socket.AF_INET
+
+def IP_address():
+        try:
+            s = socket.socket(socket_family, socket.SOCK_DGRAM)
+            s.connect(external_IP_and_port)
+            answer = s.getsockname()
+            s.close()
+            return answer[0] if answer else None
+        except socket.error:
+            return None
+
+# Get MAC address of a local interfaces
+def psutil_iface(iface):
+    # type: (str) -> Optional[str]
+    import psutil
+    nics = psutil.net_if_addrs()
+    if iface in nics:
+        nic = nics[iface]
+        for i in nic:
+            if i.family == psutil.AF_LINK:
+                return i.address
 # Random Word
 def randomword(length):
  return ''.join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ".lower()) for i in range(length))
@@ -52,6 +82,14 @@ packet_size=3000
 
 # Create unique id
 uniqueid = 'nano_uuid_{0}_{1}'.format(randomword(3),strftime("%Y%m%d%H%M%S",gmtime()))
+uuid = '{0}_{1}'.format(strftime("%Y%m%d%H%M%S",gmtime()),uuid.uuid4())
+
+host_name = socket.gethostname()
+host_ip = socket.gethostbyname(host_name)
+
+# image output
+filename = '/opt/demo/images/image_{0}_{1}.jpg'.format(randomword(3),strftime("%Y%m%d%H%M%S",gmtime()))
+# /opt/demo/images
 
 # CPU Temp
 f = open("/sys/devices/virtual/thermal/thermal_zone1/temp","r")
@@ -73,7 +111,7 @@ f.close()
 # parse the command line
 parser = argparse.ArgumentParser(description="Classify a live camera stream using an image recognition DNN.", 
 						   formatter_class=argparse.RawTextHelpFormatter, epilog=jetson.inference.imageNet.Usage())
-
+parser.add_argument("file_in", type=str, help="filename of the input image to process")
 parser.add_argument("--network", type=str, default="googlenet", help="pre-trained model to load, see below for options")
 parser.add_argument("--camera", type=str, default="/dev/video0", help="index of the MIPI CSI camera to use (NULL for CSI camera 0),\nor for VL42 cameras the /dev/video node to use (/dev/video0).\nby default, MIPI CSI camera 0 will be used.")
 parser.add_argument("--width", type=int, default=1280, help="desired width of camera stream (default is 1280 pixels)")
@@ -88,29 +126,49 @@ net = jetson.inference.imageNet(opt.network, argv)
 # net.EnableDebug()
 
 # create the camera and display
-camera = jetson.utils.gstCamera(opt.width, opt.height, opt.camera)
+#camera = jetson.utils.gstCamera(opt.width, opt.height, opt.camera)
+#camera.Open()
 
-img, width, height = camera.CaptureRGBA()
-
+#img, width, height = camera.CaptureRGBA()
+img, width, height = jetson.utils.loadImageRGBA(opt.file_in)
 # classify the image
 class_idx, confidence = net.Classify(img, width, height)
 
 # find the object description
 class_desc = net.GetClassDesc(class_idx)
 
-# print(class_desc)
+ipaddress = IP_address()
 
-# overlay the result on the image	
-# print( "{:05.2f}% {:s}".format(confidence * 100, class_desc))
-	
-# render the image
-# update the title bar
-# print("{:s} | Network {:.0f} FPS".format(net.GetNetworkName(), 1000.0 / net.GetNetworkTime()))
-
-# print out performance info
-# net.PrintProfilerTimes()
+font = jetson.utils.cudaFont(size=jetson.utils.adaptFontSize(width))
+font.OverlayText(img, width, height, "{:f}% {:s}".format(confidence * 100, class_desc), 10, 10, font.White, font.Gray40)
+jetson.utils.cudaDeviceSynchronize()
+jetson.utils.saveImageRGBA(filename, img, width, height)
 end = time.time()
+row = { }
 
-row = { 'uuid': uniqueid,  'top1pct': (confidence * 100), 'top1': class_desc, 'cputemp': cputemp, 'gputemp': gputemp,  'gputempf': gputempf, 'cputempf': cputempf, 'runtime': str(round(end - start)) }
+row['uuid'] =  uniqueid
+row['ipaddress']=ipaddress
+row['top1pct'] =  (confidence * 100)
+row['top1'] =  class_desc 
+row['cputemp'] =  cputemp 
+row['gputemp'] =  gputemp 
+row['gputempf'] =  gputempf
+row['cputempf'] =  cputempf
+row['runtime'] = str(round(end - start)) 
+row['host'] = os.uname()[1]
+row['filename'] = filename
+row['imageinput'] = opt.file_in
+row['host_name'] = host_name
+row['macaddress'] = psutil_iface('wlan0')
+row['end'] = '{0}'.format( str(end ))
+row['te'] = '{0}'.format(str(end-start))
+row['systemtime'] = datetime.datetime.now().strftime('%m/%d/%Y %H:%M:%S')
+row['cpu'] = psutil.cpu_percent(interval=1)
+usage = psutil.disk_usage("/")
+row['diskusage'] = "{:.1f} MB".format(float(usage.free) / 1024 / 1024)
+row['memory'] = psutil.virtual_memory().percent
+row['id'] = str(uuid)
 json_string = json.dumps(row)
-print (json_string )
+fa=open("/opt/demo/logs/nano.log", "a+")
+fa.write(json_string + "\n")
+fa.close()
